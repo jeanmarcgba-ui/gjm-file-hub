@@ -283,6 +283,8 @@ img{max-width:100%;}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script>
 /* ============================================================
    GJM FILE HUB — application container multimédia GJM Technologie
@@ -902,12 +904,13 @@ function confirmWipe(){
 function renderConvert(el){
   el.innerHTML = `
     <div class="section-title"><h2>🔁 Conversion de fichiers</h2></div>
-    <div class="tag-note">Ces conversions se font directement sur votre appareil. Certaines conversions (Excel → PDF fidèle, PDF → Word modifiable) demandent des logiciels spécialisés et ne sont pas incluses ici pour garantir un résultat fiable.</div>
+    <div class="tag-note">Ces conversions se font directement sur votre appareil. PDF → Word récupère le texte et les titres, mais pas la mise en page exacte (images, tableaux). Excel → PDF n'est pas inclus.</div>
     <div class="conv-grid" id="conv-grid"></div>
   `;
   const tools = [
     {id:'img2pdf', title:'Image(s) → PDF', desc:'Assemble une ou plusieurs photos dans un seul PDF.', accept:'image/*', multi:true},
     {id:'pdf2img', title:'PDF → Images', desc:"Exporte chaque page d'un PDF en image PNG.", accept:'.pdf,application/pdf', multi:false},
+    {id:'pdf2docx', title:'PDF → Word (.docx)', desc:'Récupère le texte d\'un PDF dans un document Word modifiable.', accept:'.pdf,application/pdf', multi:false},
     {id:'docx2pdf', title:'Word (.docx) → PDF', desc:'Convertit un document Word en PDF imprimable.', accept:'.docx', multi:false},
     {id:'img2icon', title:'Image → Icône', desc:'Transforme un logo/image en icône carrée (PNG 512×512).', accept:'image/*', multi:false},
   ];
@@ -924,6 +927,8 @@ function renderConvert(el){
   document.getElementById('in-img2pdf').onchange = e=>convertImagesToPdf(e.target.files);
   document.getElementById('btn-pdf2img').onclick = ()=>document.getElementById('in-pdf2img').click();
   document.getElementById('in-pdf2img').onchange = e=>convertPdfToImages(e.target.files[0]);
+  document.getElementById('btn-pdf2docx').onclick = ()=>document.getElementById('in-pdf2docx').click();
+  document.getElementById('in-pdf2docx').onchange = e=>convertPdfToDocx(e.target.files[0]);
   document.getElementById('btn-docx2pdf').onclick = ()=>document.getElementById('in-docx2pdf').click();
   document.getElementById('in-docx2pdf').onchange = e=>convertDocxToPdf(e.target.files[0]);
   document.getElementById('btn-img2icon').onclick = ()=>document.getElementById('in-img2icon').click();
@@ -947,20 +952,27 @@ async function saveBlob(filename, blob){
 async function convertImagesToPdf(files){
   if(!files || !files.length) return;
   setStatus('img2pdf', 'Conversion…');
-  const { jsPDF } = window.jspdf;
-  const pdf = new jsPDF();
-  for(let i=0;i<files.length;i++){
-    const dataUrl = await fileToDataUrl(files[i]);
-    const img = await loadImage(dataUrl);
-    const w = pdf.internal.pageSize.getWidth(), h = pdf.internal.pageSize.getHeight();
-    const ratio = Math.min(w/img.width, h/img.height);
-    const iw = img.width*ratio, ih = img.height*ratio;
-    if(i>0) pdf.addPage();
-    pdf.addImage(dataUrl, 'JPEG', (w-iw)/2, (h-ih)/2, iw, ih);
-  }
-  const blob = pdf.output('blob');
-  await saveBlob('images-converties.pdf', blob);
-  setStatus('img2pdf', 'Terminé ✅');
+  try{
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF();
+    for(let i=0;i<files.length;i++){
+      const img = await loadImage(await fileToDataUrl(files[i]));
+      const k = Math.min(1, 2400/Math.max(img.width, img.height));
+      const cv = document.createElement('canvas');
+      cv.width = Math.round(img.width*k); cv.height = Math.round(img.height*k);
+      const cx = cv.getContext('2d');
+      cx.fillStyle = '#fff'; cx.fillRect(0,0,cv.width,cv.height);
+      cx.drawImage(img, 0, 0, cv.width, cv.height);
+      const jpg = cv.toDataURL('image/jpeg', 0.92);
+      const w = pdf.internal.pageSize.getWidth(), h = pdf.internal.pageSize.getHeight();
+      const ratio = Math.min(w/cv.width, h/cv.height);
+      const iw = cv.width*ratio, ih = cv.height*ratio;
+      if(i>0) pdf.addPage();
+      pdf.addImage(jpg, 'JPEG', (w-iw)/2, (h-ih)/2, iw, ih);
+    }
+    await saveBlob('images-converties.pdf', pdf.output('blob'));
+    setStatus('img2pdf', 'Terminé ✅');
+  }catch(e){ console.error(e); setStatus('img2pdf', "Échec de la conversion (image illisible ?)"); }
 }
 
 async function convertPdfToImages(file){
@@ -983,26 +995,101 @@ async function convertPdfToImages(file){
   }catch(e){ console.error(e); setStatus('pdf2img', "Échec de la conversion"); }
 }
 
+/* ---- PDF → Word (.docx) : récupère le texte et la structure de base ---- */
+async function pdfDocToDocxBlob(doc){
+  const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g,'');
+  const pages = [], sizes = [];
+  for(let p=1;p<=doc.numPages;p++){
+    const page = await doc.getPage(p);
+    const tc = await page.getTextContent();
+    const items = tc.items.filter(i=>typeof i.str==='string' && i.str.length>0)
+      .map(i=>({s:i.str, x:i.transform[4], y:i.transform[5], h:Math.abs(i.transform[3])||i.height||10, w:i.width||0}));
+    items.sort((a,b)=>(b.y-a.y)||(a.x-b.x));
+    const lines = [];
+    for(const it of items){
+      const last = lines[lines.length-1];
+      if(last && Math.abs(last.y-it.y) <= Math.max(2, it.h*0.5)) last.items.push(it);
+      else lines.push({y:it.y, items:[it]});
+    }
+    const out = lines.map(L=>{
+      L.items.sort((a,b)=>a.x-b.x);
+      let text='', prevEnd=null, h=0;
+      for(const it of L.items){
+        if(prevEnd!==null && it.x-prevEnd > it.h*0.25 && !text.endsWith(' ') && !it.s.startsWith(' ')) text+=' ';
+        text += it.s; prevEnd = it.x+it.w; h = Math.max(h, it.h);
+      }
+      return {y:L.y, h, text:text.replace(/\s+$/,'')};
+    }).filter(l=>l.text.trim()!=='');
+    out.forEach(l=>sizes.push(l.h));
+    pages.push(out);
+  }
+  if(!sizes.length) return null;
+  sizes.sort((a,b)=>a-b);
+  const median = sizes[Math.floor(sizes.length/2)];
+  let body = '';
+  pages.forEach((lines,pi)=>{
+    const maxLen = Math.max(1, ...lines.map(l=>l.text.length));
+    const paras = []; let cur = null;
+    lines.forEach((l,i)=>{
+      const prev = lines[i-1];
+      const heading = l.h > median*1.25;
+      const startNew = !cur || heading || cur.heading || (prev && ((prev.y-l.y) > prev.h*1.6 || prev.text.length < maxLen*0.6));
+      if(startNew){ cur = {heading, h:l.h, text:l.text}; paras.push(cur); }
+      else cur.text += ' ' + l.text;
+    });
+    paras.forEach((pa,k)=>{
+      const rpr = pa.heading ? `<w:rPr><w:b/><w:sz w:val="${Math.min(56,Math.max(26,Math.round(pa.h*2)))}"/></w:rPr>` : '';
+      const pb = (pi>0 && k===0) ? '<w:pageBreakBefore/>' : '';
+      body += `<w:p><w:pPr>${pb}<w:spacing w:after="120"/></w:pPr><w:r>${rpr}<w:t xml:space="preserve">${esc(pa.text)}</w:t></w:r></w:p>`;
+    });
+  });
+  const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const head = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', head+'<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>');
+  zip.file('_rels/.rels', head+'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
+  zip.file('word/_rels/document.xml.rels', head+'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>');
+  zip.file('word/styles.xml', head+`<w:styles xmlns:w="${W}"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:cs="Calibri"/><w:sz w:val="22"/><w:lang w:val="fr-FR"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>`);
+  zip.file('word/document.xml', head+`<w:document xmlns:w="${W}"><w:body>${body}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134" w:header="708" w:footer="708" w:gutter="0"/></w:sectPr></w:body></w:document>`);
+  return zip.generateAsync({type:'blob', mimeType:'application/vnd.openxmlformats-officedocument.wordprocessingml.document'});
+}
+
+async function convertPdfToDocx(file){
+  if(!file) return;
+  setStatus('pdf2docx', 'Conversion…');
+  try{
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    const buf = await file.arrayBuffer();
+    const doc = await pdfjsLib.getDocument({data:buf}).promise;
+    const blob = await pdfDocToDocxBlob(doc);
+    if(!blob){ setStatus('pdf2docx', "Aucun texte trouvé : ce PDF est une image scannée, il ne peut pas être converti en Word modifiable."); return; }
+    await saveBlob(file.name.replace(/\.pdf$/i,'') + '.docx', blob);
+    setStatus('pdf2docx', 'Terminé ✅ — vérifiez la mise en page dans Word');
+  }catch(e){ console.error(e); setStatus('pdf2docx', "Échec de la conversion (PDF protégé ou endommagé ?)"); }
+}
+
 async function convertDocxToPdf(file){
   if(!file) return;
   setStatus('docx2pdf', 'Conversion…');
+  let wrapper = null;
   try{
+    if(typeof html2canvas === 'undefined') throw new Error('html2canvas manquant (connexion internet requise)');
     const buf = await file.arrayBuffer();
     const res = await mammoth.convertToHtml({arrayBuffer:buf});
     const { jsPDF } = window.jspdf;
     const pdf = new jsPDF({unit:'pt', format:'a4'});
-    const wrapper = document.createElement('div');
-    wrapper.style.cssText = 'width:520px;font-family:Helvetica,Arial,sans-serif;font-size:12px;color:#111;line-height:1.5;';
-    wrapper.innerHTML = res.value;
-    await pdf.html(wrapper, {
-      callback: async function(doc){
-        const blob = doc.output('blob');
-        await saveBlob(file.name.replace(/\.docx$/i,'') + '.pdf', blob);
-        setStatus('docx2pdf', 'Terminé ✅');
-      },
-      margin:[40,40,40,40], autoPaging:'text', x:0, y:0
-    });
-  }catch(e){ console.error(e); setStatus('docx2pdf', "Échec — document trop complexe pour une conversion fidèle"); }
+    wrapper = document.createElement('div');
+    wrapper.style.cssText = 'width:515px;background:#fff;color:#111;font-family:Helvetica,Arial,sans-serif;font-size:12px;line-height:1.5;';
+    wrapper.innerHTML = '<style>p{margin:0 0 8px}h1,h2,h3{margin:14px 0 8px}img{max-width:100%}table{border-collapse:collapse;width:100%}td,th{border:1px solid #999;padding:4px}</style>' + res.value;
+    await pdf.html(wrapper, { margin:[40,40,40,40], autoPaging:'text', x:0, y:0, width:515, windowWidth:515 });
+    await saveBlob(file.name.replace(/\.docx$/i,'') + '.pdf', pdf.output('blob'));
+    setStatus('docx2pdf', 'Terminé ✅');
+  }catch(e){
+    console.error(e);
+    setStatus('docx2pdf', navigator.onLine ? "Échec de la conversion (fichier .docx illisible ou trop complexe)" : "Connexion internet requise pour cette conversion.");
+  }finally{
+    if(wrapper && wrapper.parentNode) wrapper.parentNode.removeChild(wrapper);
+  }
 }
 
 async function convertImageToIcon(file){
