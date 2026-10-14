@@ -310,7 +310,7 @@ img{max-width:100%;}
 let claudeDownloads = null;
 let idb = null;
 let deferredInstallPrompt = null;
-const APP_VERSION = '1.3 · 14/10/2026 · lecteur enchaîné + écran verrouillé + fenêtre flottante';
+const APP_VERSION = '1.4 · 14/10/2026 · menu Téléchargement (lien direct) + lecteur enchaîné + écran verrouillé';
 let state = {
   settings: { appName:"GJM File Hub", ownerName:"", username:"", passwordHash:"" },
   avatarURL: null,
@@ -560,7 +560,7 @@ function renderView(view, opts, skipHistory, keepPlayer){
   el.innerHTML = '';
   const renderers = {
     home: renderHome, library: renderLibrary, nav: renderNav,
-    storage: renderStorage, convert: renderConvert, options: renderOptions
+    storage: renderStorage, convert: renderConvert, download: renderDownload, options: renderOptions
   };
   (renderers[view] || renderHome)(el, opts||{});
   document.getElementById('view').scrollTop = 0;
@@ -574,6 +574,7 @@ const MENU = [
   {id:'photo', label:'Photos', sub:'Voir & organiser', ic:'🖼️', color:'#38b26a'},
   {id:'nav', label:'Navigation', sub:'Rechercher sur le web', ic:'🌐', color:'#3fa0e0'},
   {id:'storage', label:'Stockage', sub:'Fichiers sur cet appareil', ic:'💾', color:'#e0a63f'},
+  {id:'download', label:'Téléchargement', sub:'Depuis un lien direct', ic:'⬇️', color:'#17a2a2'},
   {id:'convert', label:'Conversion', sub:'Formats de fichiers', ic:'🔁', color:'#8a5fe0'},
   {id:'options', label:'Options', sub:'Sécurité & profil', ic:'⚙️', color:'#5b6c8a'},
 ];
@@ -1120,6 +1121,182 @@ function confirmWipe(){
     goHome();
     toast("Stockage vidé");
   };
+}
+
+
+/* ---------------- TÉLÉCHARGEMENT (lien direct) ---------------- */
+const DL_AUDIO_EXT = ['mp3','m4a','aac','wav','ogg','oga','opus','flac','wma'];
+const DL_VIDEO_EXT = ['mp4','webm','mkv','mov','m4v','3gp','avi'];
+const DL_BLOCKED = /(^|\.)(youtube\.com|youtu\.be|facebook\.com|fb\.watch|fb\.com|tiktok\.com|instagram\.com|twitter\.com|x\.com|spotify\.com|deezer\.com|soundcloud\.com|netflix\.com|dailymotion\.com|vimeo\.com)$/i;
+const dlState = {url:'', name:'', type:null, size:null};
+
+function dlNameFromUrl(u){
+  try{
+    const seg = u.pathname.split('/').filter(Boolean).pop() || 'fichier';
+    return decodeURIComponent(seg);
+  }catch(e){ return 'fichier'; }
+}
+function dlTypeFromExt(name){
+  const m = /\.([a-z0-9]+)$/i.exec(name||'');
+  if(!m) return null;
+  const e = m[1].toLowerCase();
+  if(DL_AUDIO_EXT.includes(e)) return 'audio';
+  if(DL_VIDEO_EXT.includes(e)) return 'video';
+  return null;
+}
+function dlTypeFromMime(m){
+  m = (m||'').toLowerCase();
+  if(m.startsWith('audio/')) return 'audio';
+  if(m.startsWith('video/')) return 'video';
+  return null;
+}
+
+function renderDownload(el){
+  dlState.url=''; dlState.name=''; dlState.type=null; dlState.size=null;
+  el.innerHTML = `
+    <div class="section-title"><h2>⬇️ Téléchargement</h2></div>
+    <div class="tag-note">Collez le lien <b>direct</b> d'un fichier audio ou vidéo (qui se termine par .mp3, .mp4…). Les liens de YouTube, Facebook, TikTok, Instagram, Spotify, etc. ne sont pas pris en charge. Utilisez uniquement des contenus dont vous avez le droit (vos propres fichiers, contenus libres).</div>
+    <div class="conv-card" id="dl-box"></div>`;
+  dlStep1();
+}
+
+function dlStep1(msg){
+  const box = document.getElementById('dl-box'); if(!box) return;
+  box.innerHTML = `
+    <h4>Étape 1 · Lien du fichier</h4>
+    <div class="field"><label for="dl-url">Lien (http:// ou https://)</label>
+      <input type="url" id="dl-url" placeholder="https://exemple.com/chanson.mp3" autocapitalize="off" autocomplete="off" spellcheck="false" value="${escapeHtml(dlState.url)}"></div>
+    <button class="btn" id="dl-next" style="width:100%;">Suivant</button>
+    <div class="err" id="dl-err">${msg?escapeHtml(msg):''}</div>`;
+  const inp = document.getElementById('dl-url');
+  document.getElementById('dl-next').onclick = dlNext;
+  inp.onkeydown = e=>{ if(e.key==='Enter') dlNext(); };
+}
+
+async function dlNext(){
+  const err = document.getElementById('dl-err');
+  const raw = document.getElementById('dl-url').value.trim();
+  dlState.url = raw;
+  let u;
+  try{ u = new URL(raw); if(!/^https?:$/.test(u.protocol)) throw 0; }
+  catch(e){ err.textContent = "Ce lien n'est pas valide. Il doit commencer par http:// ou https://"; return; }
+  if(DL_BLOCKED.test(u.hostname)){
+    err.textContent = "Ce site (plateforme de streaming / réseau social) n'est pas pris en charge. Collez le lien direct d'un fichier .mp3 ou .mp4.";
+    return;
+  }
+  const btn = document.getElementById('dl-next');
+  btn.disabled = true; err.textContent = 'Vérification du lien…';
+  dlState.name = dlNameFromUrl(u);
+  dlState.type = dlTypeFromExt(dlState.name);
+  dlState.size = null;
+  try{
+    const ctl = new AbortController(); const to = setTimeout(()=>ctl.abort(), 12000);
+    const r = await fetch(raw, {method:'HEAD', signal:ctl.signal}); clearTimeout(to);
+    if(r.ok){
+      const t = dlTypeFromMime(r.headers.get('content-type'));
+      if(t) dlState.type = t;
+      const l = parseInt(r.headers.get('content-length')||'',10);
+      if(l>0) dlState.size = l;
+    }
+  }catch(e){ /* HEAD bloqué : on décidera à l'étape suivante */ }
+  if(!dlState.type){
+    btn.disabled = false;
+    err.textContent = "Impossible de reconnaître un fichier audio (MP3…) ou vidéo (MP4…) à ce lien. Vérifiez qu'il s'agit bien d'un lien direct vers le fichier.";
+    return;
+  }
+  dlStep2();
+}
+
+function dlStep2(msg){
+  const box = document.getElementById('dl-box'); if(!box) return;
+  const isAudio = dlState.type==='audio';
+  const ext = ((/\.([a-z0-9]+)$/i.exec(dlState.name)||[])[1]||'').toUpperCase();
+  box.innerHTML = `
+    <h4>Étape 2 · Fichier détecté</h4>
+    <p style="font-size:13px;margin:0 0 4px;word-break:break-all;">${isAudio?'🎵':'🎬'} <b>${escapeHtml(dlState.name)}</b></p>
+    <p>Format : <b>${isAudio?'MP3 / audio':'MP4 / vidéo'}</b>${ext?' ('+escapeHtml(ext)+')':''}${dlState.size?' · '+formatSize(dlState.size):''}<br>
+    Le fichier est téléchargé tel quel, sans conversion.</p>
+    <div class="field"><label for="dl-dest">Enregistrer dans</label>
+      <select id="dl-dest">
+        <option value="app">L'application (${isAudio?'Musique':'Vidéo'})</option>
+        <option value="device">Cet appareil (dossier Téléchargements)</option>
+      </select></div>
+    <div style="display:flex;gap:10px;">
+      <button class="btn secondary" id="dl-back" style="flex:1;">Retour</button>
+      <button class="btn" id="dl-go" style="flex:2;">Télécharger</button>
+    </div>
+    <div class="dl-bar" id="dl-bar" style="display:none;height:8px;border-radius:6px;background:var(--border);margin-top:12px;overflow:hidden;"><div id="dl-fill" style="height:100%;width:0;background:var(--accent);"></div></div>
+    <div class="err" id="dl-err2">${msg?escapeHtml(msg):''}</div>
+    <div id="dl-fallback"></div>`;
+  document.getElementById('dl-back').onclick = ()=>dlStep1();
+  document.getElementById('dl-go').onclick = dlRun;
+}
+
+async function dlRun(){
+  const err = document.getElementById('dl-err2');
+  const go = document.getElementById('dl-go');
+  const dest = document.getElementById('dl-dest').value;
+  const bar = document.getElementById('dl-bar'), fill = document.getElementById('dl-fill');
+  go.disabled = true; err.textContent = 'Téléchargement…'; bar.style.display='block'; fill.style.width='0';
+  try{
+    const r = await fetch(dlState.url);
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const mimeT = dlTypeFromMime(r.headers.get('content-type'));
+    const total = parseInt(r.headers.get('content-length')||'',10) || dlState.size || 0;
+    const chunks = []; let got = 0;
+    if(r.body && r.body.getReader){
+      const rd = r.body.getReader();
+      for(;;){
+        const {done, value} = await rd.read(); if(done) break;
+        chunks.push(value); got += value.length;
+        if(total){ fill.style.width = Math.min(100, got/total*100).toFixed(1)+'%'; err.textContent = 'Téléchargement… '+formatSize(got)+' / '+formatSize(total); }
+        else err.textContent = 'Téléchargement… '+formatSize(got);
+      }
+    } else {
+      const b = await r.blob(); chunks.push(b); got = b.size;
+    }
+    const mime = (r.headers.get('content-type')||'').split(';')[0] || (dlState.type==='audio'?'audio/mpeg':'video/mp4');
+    const blob = new Blob(chunks, {type: mime});
+    if(!blob.size) throw new Error('vide');
+    let type = dlState.type; if(mimeT) type = mimeT;
+    let name = dlState.name;
+    if(!/\.[a-z0-9]{2,5}$/i.test(name)) name += (type==='audio'?'.mp3':'.mp4');
+    fill.style.width='100%';
+    if(dest==='app'){
+      const file = new File([blob], name, {type: mime});
+      await handleUpload([file], type, null);
+      err.textContent = '';
+      toast('Ajouté dans '+(type==='audio'?'Musique':'Vidéo'));
+      box_done(name, type, 'app');
+    } else {
+      await saveBlob(name, blob);
+      toast('Fichier enregistré sur l\'appareil');
+      box_done(name, type, 'device');
+    }
+  }catch(e){
+    console.error(e);
+    go.disabled = false; bar.style.display='none';
+    err.textContent = "Le téléchargement a échoué. Le site qui héberge ce fichier n'autorise probablement pas les applications à le récupérer (restriction CORS), ou le lien a expiré.";
+    const fb = document.getElementById('dl-fallback');
+    if(fb){
+      fb.innerHTML = '<a class="btn secondary small" style="display:block;text-align:center;margin-top:10px;text-decoration:none;" target="_blank" rel="noopener">Ouvrir le lien dans le navigateur</a>';
+      fb.firstChild.href = dlState.url;
+    }
+  }
+}
+
+function box_done(name, type, dest){
+  const box = document.getElementById('dl-box'); if(!box) return;
+  box.innerHTML = `
+    <h4>✅ Téléchargement terminé</h4>
+    <p style="word-break:break-all;">${escapeHtml(name)} ${dest==='app' ? '— disponible dans « '+(type==='audio'?'Musique':'Vidéo')+' ».' : '— enregistré sur votre appareil.'}</p>
+    <div style="display:flex;gap:10px;">
+      <button class="btn secondary" id="dl-again" style="flex:1;">Un autre lien</button>
+      ${dest==='app'?'<button class="btn" id="dl-open" style="flex:1;">Ouvrir '+(type==='audio'?'Musique':'Vidéo')+'</button>':''}
+    </div>`;
+  document.getElementById('dl-again').onclick = ()=>{ dlState.url=''; dlStep1(); };
+  const o = document.getElementById('dl-open');
+  if(o) o.onclick = ()=>navTo('library', {type});
 }
 
 /* ---------------- CONVERSION ---------------- */
