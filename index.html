@@ -58,7 +58,7 @@ img{max-width:100%;}
 
 /* ---------- Layout ---------- */
 #app{flex:1;display:flex;flex-direction:column;min-height:0;}
-.view{flex:1;overflow-y:auto;padding:16px;padding-bottom:90px;}
+.view{flex:1;overflow-y:auto;padding:16px;padding-bottom:140px;}
 .container{max-width:760px;margin:0 auto;width:100%;}
 
 /* ---------- Lock / login ---------- */
@@ -177,6 +177,17 @@ img{max-width:100%;}
 .player-bar .pname{font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .player-bar audio{width:100%;height:32px;}
 .player-bar .pclose{background:none;border:none;color:var(--text-dim);font-size:18px;cursor:pointer;}
+.pctrl{display:flex;align-items:center;gap:6px;flex-shrink:0;}
+.pbtn{background:var(--surface2);border:1px solid var(--border);color:var(--text);width:38px;height:38px;border-radius:50%;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;}
+.pbtn:hover{border-color:var(--accent);}
+.pbtn.mode{width:auto;border-radius:19px;padding:0 12px;font-size:12px;font-weight:600;gap:5px;white-space:nowrap;}
+.vctrl{display:flex;align-items:center;justify-content:center;gap:10px;margin-top:12px;flex-wrap:wrap;}
+@media(max-width:520px){
+  .player-bar{flex-wrap:wrap;}
+  .player-bar .pinfo{flex-basis:100%;order:1;}
+  .player-bar .pctrl{order:2;flex:1;justify-content:center;}
+  .player-bar .pclose{order:3;}
+}
 
 /* modal */
 .modal-bg{
@@ -213,7 +224,7 @@ img{max-width:100%;}
 
 /* toast */
 #toast{
-  position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--surface2);
+  position:fixed;bottom:110px;left:50%;transform:translateX(-50%);background:var(--surface2);
   border:1px solid var(--border);color:var(--text);padding:10px 16px;border-radius:20px;font-size:13px;
   z-index:200;box-shadow:var(--shadow);opacity:0;pointer-events:none;transition:opacity .25s;
 }
@@ -254,6 +265,7 @@ img{max-width:100%;}
     <div class="err" id="lock-err"></div>
     <button class="btn" id="lock-submit">Se connecter</button>
     <button class="btn ghost small" id="lock-forgot" type="button" style="margin-top:12px;">Identifiant ou mot de passe oublié ?</button>
+    <p id="lock-version" style="font-size:10.5px;color:var(--text-dim);margin:14px 0 0;"></p>
   </div>
 </div>
 
@@ -274,6 +286,11 @@ img{max-width:100%;}
     <div class="pname" id="player-name">—</div>
     <audio id="player-audio" controls></audio>
   </div>
+  <div class="pctrl">
+    <button class="pbtn" id="p-prev" title="Précédent">⏮</button>
+    <button class="pbtn mode" id="p-mode" title="Changer le mode de lecture"></button>
+    <button class="pbtn" id="p-next" title="Suivant">⏭</button>
+  </div>
   <button class="pclose" id="player-close">✕</button>
 </div>
 
@@ -293,6 +310,7 @@ img{max-width:100%;}
 let claudeDownloads = null;
 let idb = null;
 let deferredInstallPrompt = null;
+const APP_VERSION = '1.3 · 14/10/2026 · lecteur enchaîné + écran verrouillé + fenêtre flottante';
 let state = {
   settings: { appName:"GJM File Hub", ownerName:"", username:"", passwordHash:"" },
   avatarURL: null,
@@ -356,6 +374,7 @@ async function sha256(str){
 window.addEventListener('DOMContentLoaded', boot);
 
 async function boot(){
+  const lv = document.getElementById('lock-version'); if(lv) lv.textContent = 'Version ' + APP_VERSION.split(' · ')[0];
   document.getElementById('lock-submit').addEventListener('click', tryLogin);
   document.getElementById('lock-forgot').addEventListener('click', forgotLogin);
   document.getElementById('lock-eye').addEventListener('click', ()=>{
@@ -365,6 +384,11 @@ async function boot(){
   document.getElementById('lock-pass').addEventListener('keydown', e=>{ if(e.key==='Enter') tryLogin(); });
   document.getElementById('btn-back').addEventListener('click', ()=>navBack());
   document.getElementById('player-close').addEventListener('click', closePlayer);
+  document.getElementById('p-prev').addEventListener('click', ()=>stepAudio(-1));
+  document.getElementById('p-next').addEventListener('click', ()=>stepAudio(1));
+  document.getElementById('p-mode').addEventListener('click', ()=>cycleMode('audio'));
+  document.getElementById('player-audio').addEventListener('ended', ()=>onMediaEnded('audio'));
+  attachSessionListeners(document.getElementById('player-audio'), 'audio');
 
   try{
     claudeDownloads = await claude.use('downloads');
@@ -488,6 +512,7 @@ function forgotLogin(){
     state.media = []; state.folders = [];
     state.settings = { appName:"GJM File Hub", ownerName:"", username:"", passwordHash:"" };
     state.avatarURL = null;
+    closePlayer();
     applyBranding();
     unlockApp();
     toast("Application réinitialisée");
@@ -500,6 +525,7 @@ function unlockApp(){
   goHome();
 }
 function lockApp(){
+  closePlayer();
   state.unlocked = false;
   document.getElementById('lock-pass').value = '';
   showLock();
@@ -524,15 +550,14 @@ function goHome(){
   renderView('home');
 }
 function renderCurrentView(){
-  if(state.currentView) renderView(state.currentView, state.currentOpts, true);
+  if(state.currentView) renderView(state.currentView, state.currentOpts, true, true);
 }
 
-function renderView(view, opts, skipHistory){
+function renderView(view, opts, skipHistory, keepPlayer){
   state.currentView = view;
   state.currentOpts = opts || {};
   const el = document.getElementById('view-inner');
   el.innerHTML = '';
-  closePlayer();
   const renderers = {
     home: renderHome, library: renderLibrary, nav: renderNav,
     storage: renderStorage, convert: renderConvert, options: renderOptions
@@ -665,7 +690,7 @@ function renderLibrary(el, opts){
       <div class="meta"><div class="name">${escapeHtml(it.name)}</div>
       <div class="sub">${formatSize(it.size)} · ${formatDate(it.addedAt)}</div></div>
       <button class="del">✕</button>`;
-    row.querySelector('.meta').onclick = ()=> type==='audio' ? playAudio(it) : openViewer(it);
+    row.querySelector('.meta').onclick = ()=> type==='audio' ? playAudio(it, items) : openViewer(it, items);
     row.querySelector('.del').onclick = (e)=>{ e.stopPropagation(); confirmDelete(it); };
     list.appendChild(row);
   });
@@ -707,6 +732,7 @@ function confirmDelete(item){
   document.getElementById('do-del').onclick = async ()=>{
     closeModal();
     try{
+      if(audioState.cur && audioState.cur.id===item.id) closePlayer();
       if(idb) await idbDelete('media', item.id);
       if(item.url) URL.revokeObjectURL(item.url);
       state.media = state.media.filter(m=>m.id!==item.id);
@@ -736,27 +762,188 @@ function openNewFolderModal(type){
 }
 
 /* ---------------- Player / Viewer ---------------- */
-function playAudio(item){
-  const bar = document.getElementById('player-bar');
-  bar.classList.remove('hidden');
-  document.getElementById('player-name').textContent = item.name;
+/* ---------------- Lecture enchaînée + modes (musique & vidéo) ---------------- */
+const PLAY_MODES = [
+  {id:'seq', ic:'➡️', short:'Enchaîner', label:'Enchaîner : on passe au suivant, puis on s\'arrête à la fin de la liste'},
+  {id:'all', ic:'🔁', short:'Boucle liste', label:'Boucle de la liste : après le dernier, on recommence au premier'},
+  {id:'one', ic:'🔂', short:'Répéter 1', label:'Répéter le même : le titre actuel se rejoue en boucle'},
+];
+let audioState = {queue:[], idx:0, cur:null};
+let videoState = {queue:[], idx:0, cur:null};
+let mediaKind = null;       // 'audio' ou 'video' : ce qui pilote les commandes de l'écran verrouillé
+let lastPosSync = 0;
+
+/* ---- Commandes système : écran verrouillé, notification, casque Bluetooth, fenêtre flottante ---- */
+function activeMedia(kind){ return document.getElementById(kind==='audio' ? 'player-audio' : 'viewer-video'); }
+function artworkList(){
+  const img = document.querySelector('.lock-logo');
+  return (img && img.src) ? [{src:img.src, sizes:'400x400', type:'image/png'}] : [];
+}
+function updateMediaSession(kind){
+  if(!('mediaSession' in navigator)) return;
+  const st = kind==='audio' ? audioState : videoState;
+  if(!st.cur) return;
+  mediaKind = kind;
+  const ms = navigator.mediaSession;
+  try{
+    ms.metadata = new MediaMetadata({
+      title: st.cur.name,
+      artist: state.settings.appName || 'GJM File Hub',
+      album: kind==='audio' ? 'Musique' : 'Vidéo',
+      artwork: artworkList()
+    });
+  }catch(e){}
+  const set = (a,f)=>{ try{ ms.setActionHandler(a,f); }catch(e){} };
+  const el = ()=>activeMedia(kind);
+  set('play',  ()=>{ const e=el(); if(e) e.play().catch(()=>{}); });
+  set('pause', ()=>{ const e=el(); if(e) e.pause(); });
+  set('previoustrack', ()=> kind==='audio' ? stepAudio(-1) : stepVideo(-1));
+  set('nexttrack',     ()=> kind==='audio' ? stepAudio(1)  : stepVideo(1));
+  set('seekbackward', d=>{ const e=el(); if(e) e.currentTime = Math.max(0, e.currentTime - ((d&&d.seekOffset)||10)); });
+  set('seekforward',  d=>{ const e=el(); if(e) e.currentTime = Math.min(e.duration||1e9, e.currentTime + ((d&&d.seekOffset)||10)); });
+  set('seekto',       d=>{ const e=el(); if(e && d && d.seekTime!=null) e.currentTime = d.seekTime; });
+  // Vidéo : quand on quitte l'appli, le navigateur ouvre la fenêtre flottante tout seul
+  set('enterpictureinpicture', kind==='video' ? ()=>{ const e=el(); if(e && e.requestPictureInPicture) e.requestPictureInPicture().catch(()=>{}); } : null);
+  const e0 = el(); try{ ms.playbackState = (e0 && !e0.paused) ? 'playing' : 'paused'; }catch(e){}
+}
+function clearMediaSession(){
+  if(!('mediaSession' in navigator)) return;
+  const ms = navigator.mediaSession;
+  try{ ms.metadata = null; }catch(e){}
+  ['play','pause','previoustrack','nexttrack','seekbackward','seekforward','seekto','enterpictureinpicture'].forEach(a=>{ try{ ms.setActionHandler(a,null); }catch(e){} });
+  try{ ms.playbackState = 'none'; }catch(e){}
+  mediaKind = null;
+}
+function attachSessionListeners(el, kind){
+  el.addEventListener('play',  ()=>{ if(mediaKind===kind){ try{ navigator.mediaSession.playbackState='playing'; }catch(e){} } });
+  el.addEventListener('pause', ()=>{ if(mediaKind===kind){ try{ navigator.mediaSession.playbackState='paused'; }catch(e){} } });
+  el.addEventListener('timeupdate', ()=>{
+    if(mediaKind!==kind || !('mediaSession' in navigator)) return;
+    const now = Date.now(); if(now-lastPosSync<1000) return; lastPosSync = now;
+    if(!isFinite(el.duration) || el.duration<=0) return;
+    try{ navigator.mediaSession.setPositionState({duration:el.duration, playbackRate:el.playbackRate||1, position:Math.min(el.currentTime, el.duration)}); }catch(e){}
+  });
+}
+
+function getMode(kind){
+  const id = state.settings[kind==='audio' ? 'modeAudio' : 'modeVideo'] || 'seq';
+  return PLAY_MODES.find(m=>m.id===id) || PLAY_MODES[0];
+}
+function cycleMode(kind){
+  const cur = getMode(kind);
+  const nxt = PLAY_MODES[(PLAY_MODES.findIndex(m=>m.id===cur.id)+1) % PLAY_MODES.length];
+  saveSettings({[kind==='audio' ? 'modeAudio' : 'modeVideo']: nxt.id});
+  refreshModeButtons();
+  toast(nxt.label);
+}
+function refreshModeButtons(){
+  const a = getMode('audio'), v = getMode('video');
+  const pb = document.getElementById('p-mode');
+  if(pb){ pb.innerHTML = `<span>${a.ic}</span><span>${a.short}</span>`; pb.title = a.label; }
+  const vb = document.getElementById('v-mode');
+  if(vb){ vb.innerHTML = `<span>${v.ic}</span><span>${v.short}</span>`; vb.title = v.label; }
+}
+
+/* Calcule le prochain index. auto = fin naturelle du média ; sinon bouton Suivant/Précédent. */
+function pickIndex(st, kind, dir, auto){
+  const n = st.queue.length, mode = getMode(kind).id;
+  if(auto && mode==='one') return st.idx;
+  const j = st.idx + dir;
+  if(j>=0 && j<n) return j;
+  if(mode==='all') return dir>0 ? 0 : n-1;
+  return null;
+}
+
+function playAudio(item, queue){
+  const q = (queue && queue.length) ? queue : [item];
+  audioState.queue = q.slice();
+  audioState.idx = Math.max(0, audioState.queue.findIndex(m=>m.id===item.id));
+  loadAudioCurrent();
+}
+function loadAudioCurrent(){
+  const it = audioState.queue[audioState.idx];
+  if(!it) return;
+  audioState.cur = it;
+  document.getElementById('player-bar').classList.remove('hidden');
+  const n = audioState.queue.length;
+  document.getElementById('player-name').textContent = (n>1 ? (audioState.idx+1)+'/'+n+' · ' : '') + it.name;
   const audio = document.getElementById('player-audio');
-  audio.src = item.url;
+  audio.src = it.url;
   audio.play().catch(()=>{});
+  refreshModeButtons();
+  updateMediaSession('audio');
+}
+function stepAudio(dir){
+  if(!audioState.queue.length) return;
+  const audio = document.getElementById('player-audio');
+  if(dir<0 && audio.currentTime>3){ audio.currentTime = 0; return; }
+  const j = pickIndex(audioState, 'audio', dir, false);
+  if(j===null){
+    if(dir<0){ audio.currentTime = 0; } else toast("Fin de la liste");
+    return;
+  }
+  audioState.idx = j; loadAudioCurrent();
 }
 function closePlayer(){
   document.getElementById('player-bar').classList.add('hidden');
   const audio = document.getElementById('player-audio');
-  audio.pause(); audio.src = '';
+  audio.pause(); audio.removeAttribute('src'); audio.load();
+  audioState = {queue:[], idx:0, cur:null};
+  if(mediaKind==='audio') clearMediaSession();
 }
 
-function openViewer(item){
+/* Fin naturelle d'un titre ou d'une vidéo */
+function onMediaEnded(kind){
+  const st = kind==='audio' ? audioState : videoState;
+  if(!st.queue.length) return;
+  const j = pickIndex(st, kind, 1, true);
+  if(j===null) return; // fin de liste en mode « Enchaîner » : on s'arrête
+  st.idx = j;
+  if(kind==='audio'){
+    if(j===st.queue.indexOf(st.cur) && getMode('audio').id==='one'){
+      const a = document.getElementById('player-audio'); a.currentTime = 0; a.play().catch(()=>{});
+    } else loadAudioCurrent();
+  } else loadVideoCurrent();
+}
+
+/* ---- Vidéo : la fenêtre reste ouverte, on change juste la source (le plein écran est conservé) ---- */
+function loadVideoCurrent(){
+  const it = videoState.queue[videoState.idx];
+  if(!it) return;
+  const v = document.getElementById('viewer-video');
+  if(!v) return;
+  videoState.cur = it;
+  const n = videoState.queue.length;
+  const t = document.getElementById('viewer-title');
+  if(t) t.textContent = (n>1 ? (videoState.idx+1)+'/'+n+' · ' : '') + it.name;
+  v.src = it.url; v.play().catch(()=>{});
+  const dl = document.getElementById('dl-btn');
+  if(dl) dl.onclick = ()=>downloadAsset(it);
+  refreshModeButtons();
+  updateMediaSession('video');
+}
+function stepVideo(dir){
+  if(!videoState.queue.length) return;
+  const v = document.getElementById('viewer-video');
+  if(dir<0 && v && v.currentTime>3){ v.currentTime = 0; return; }
+  const j = pickIndex(videoState, 'video', dir, false);
+  if(j===null){ if(dir<0 && v) v.currentTime = 0; else toast("Fin de la liste"); return; }
+  videoState.idx = j; loadVideoCurrent();
+}
+
+function openViewer(item, queue){
   const url = item.url;
   let body = '';
   if(item.type === 'photo'){
     body = `<img src="${url}">`;
   } else if(item.type === 'video'){
-    body = `<video src="${url}" controls autoplay></video>`;
+    body = `<video id="viewer-video" src="${url}" controls autoplay playsinline></video>
+      <div class="vctrl">
+        <button class="pbtn" id="v-prev" title="Précédente">⏮</button>
+        <button class="pbtn mode" id="v-mode" title="Changer le mode de lecture"></button>
+        <button class="pbtn" id="v-next" title="Suivante">⏭</button>
+        <button class="pbtn hidden" id="v-pip" title="Fenêtre flottante : la vidéo reste visible sur l'écran d'accueil">🗗</button>
+      </div>`;
   } else if(item.type === 'document'){
     const lower = item.name.toLowerCase();
     if(lower.endsWith('.pdf')){
@@ -771,7 +958,7 @@ function openViewer(item){
   }
   openModal(`
     <button class="close-x" id="close-viewer">✕</button>
-    <h3>${escapeHtml(item.name)}</h3>
+    <h3 id="viewer-title">${escapeHtml(item.name)}</h3>
     ${body}
     <div style="display:flex;gap:10px;margin-top:14px;">
       <button class="btn secondary" id="dl-btn">⬇️ Enregistrer sur cet appareil</button>
@@ -779,6 +966,40 @@ function openViewer(item){
   `, true);
   document.getElementById('close-viewer').onclick = closeModal;
   document.getElementById('dl-btn').onclick = ()=>downloadAsset(item);
+
+  if(item.type==='video'){
+    closePlayer(); // coupe la musique éventuelle pour ne pas la mélanger à la vidéo
+    const q = (queue && queue.length) ? queue : [item];
+    videoState = {queue:q.slice(), idx:Math.max(0,q.findIndex(m=>m.id===item.id)), cur:item};
+    const v = document.getElementById('viewer-video');
+    v.addEventListener('ended', ()=>{
+      if(getMode('video').id==='one'){ v.currentTime = 0; v.play().catch(()=>{}); }
+      else onMediaEnded('video');
+    });
+    document.getElementById('v-prev').onclick = ()=>stepVideo(-1);
+    document.getElementById('v-next').onclick = ()=>stepVideo(1);
+    document.getElementById('v-mode').onclick = ()=>cycleMode('video');
+    attachSessionListeners(v, 'video');
+    // Fenêtre flottante (Picture-in-Picture)
+    try{ v.disablePictureInPicture = false; v.autoPictureInPicture = true; }catch(e){}
+    const webkitPip = !!(v.webkitSupportsPresentationMode && v.webkitSupportsPresentationMode('picture-in-picture'));
+    const stdPip = !!(document.pictureInPictureEnabled && v.requestPictureInPicture);
+    const pipBtn = document.getElementById('v-pip');
+    if(stdPip || webkitPip){
+      pipBtn.classList.remove('hidden');
+      pipBtn.onclick = async ()=>{
+        try{
+          if(stdPip){
+            if(document.pictureInPictureElement===v) await document.exitPictureInPicture();
+            else await v.requestPictureInPicture();
+          } else {
+            v.webkitSetPresentationMode(v.webkitPresentationMode==='picture-in-picture' ? 'inline' : 'picture-in-picture');
+          }
+        }catch(e){ toast("La fenêtre flottante n'est pas disponible pour cette vidéo."); }
+      };
+    }
+    loadVideoCurrent();
+  }
 
   if(item.type==='document' && item.name.toLowerCase().endsWith('.docx')){
     item.blob.arrayBuffer().then(buf=>{
@@ -894,6 +1115,7 @@ function confirmWipe(){
     state.media = []; state.folders = [];
     state.settings = { appName:"GJM File Hub", ownerName:"", username:"", passwordHash:"" };
     state.avatarURL = null;
+    closePlayer();
     applyBranding();
     goHome();
     toast("Stockage vidé");
@@ -1134,6 +1356,7 @@ function renderOptions(el){
       <p style="font-size:11.5px;color:var(--text-dim);margin-top:-6px;">Installez l'application sur cet appareil pour l'ouvrir en plein écran avec son icône, comme une vraie appli.</p>
       <button class="btn install-btn hidden" id="install-btn-options">📲 Installer l'application</button>
       <p style="font-size:11px;color:var(--text-dim);margin-top:8px;margin-bottom:0;">Bouton invisible ? Sur iPhone/iPad : appuyez sur le bouton de partage de Safari puis « Sur l'écran d'accueil ».</p>
+      <p style="font-size:11px;color:var(--text-dim);margin:10px 0 0;">Version de l'application : <b>${APP_VERSION}</b></p>
     </div>
 
     <div class="opt-block">
@@ -1223,7 +1446,15 @@ function openModal(html, viewer){
   root.innerHTML = `<div class="modal-bg ${viewer?'viewer-modal':''}" id="modal-bg"><div class="modal">${html}</div></div>`;
   document.getElementById('modal-bg').onclick = (e)=>{ if(e.target.id==='modal-bg') closeModal(); };
 }
-function closeModal(){ document.getElementById('modal-root').innerHTML = ''; }
+function closeModal(){
+  const v = document.getElementById('viewer-video');
+  if(v){
+    try{ if(document.pictureInPictureElement===v) document.exitPictureInPicture(); }catch(e){}
+    videoState = {queue:[], idx:0, cur:null};
+    if(mediaKind==='video') clearMediaSession();
+  }
+  document.getElementById('modal-root').innerHTML = '';
+}
 
 async function triggerInstall(){
   if(!deferredInstallPrompt){
