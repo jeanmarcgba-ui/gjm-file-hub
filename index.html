@@ -310,7 +310,7 @@ img{max-width:100%;}
 let claudeDownloads = null;
 let idb = null;
 let deferredInstallPrompt = null;
-const APP_VERSION = '1.4 · 14/10/2026 · menu Téléchargement (lien direct) + lecteur enchaîné + écran verrouillé';
+const APP_VERSION = '1.5 · 16/10/2026 · Espace de travail (IA) + Téléchargement + lecteur enchaîné';
 let state = {
   settings: { appName:"GJM File Hub", ownerName:"", username:"", passwordHash:"" },
   avatarURL: null,
@@ -560,7 +560,7 @@ function renderView(view, opts, skipHistory, keepPlayer){
   el.innerHTML = '';
   const renderers = {
     home: renderHome, library: renderLibrary, nav: renderNav,
-    storage: renderStorage, convert: renderConvert, download: renderDownload, options: renderOptions
+    storage: renderStorage, convert: renderConvert, download: renderDownload, workspace: renderWorkspace, options: renderOptions
   };
   (renderers[view] || renderHome)(el, opts||{});
   document.getElementById('view').scrollTop = 0;
@@ -574,6 +574,7 @@ const MENU = [
   {id:'photo', label:'Photos', sub:'Voir & organiser', ic:'🖼️', color:'#38b26a'},
   {id:'nav', label:'Navigation', sub:'Rechercher sur le web', ic:'🌐', color:'#3fa0e0'},
   {id:'storage', label:'Stockage', sub:'Fichiers sur cet appareil', ic:'💾', color:'#e0a63f'},
+  {id:'workspace', label:'Espace de travail', sub:'Tâches traitées par l\'IA', ic:'🧠', color:'#c2478b'},
   {id:'download', label:'Téléchargement', sub:'Depuis un lien direct', ic:'⬇️', color:'#17a2a2'},
   {id:'convert', label:'Conversion', sub:'Formats de fichiers', ic:'🔁', color:'#8a5fe0'},
   {id:'options', label:'Options', sub:'Sécurité & profil', ic:'⚙️', color:'#5b6c8a'},
@@ -716,7 +717,7 @@ async function handleUpload(fileList, type, folderId){
       toast("Échec de l'ajout de « " + file.name + " » (espace de stockage de l'appareil insuffisant ?)");
     }
   }
-  renderCurrentView();
+  if(!['workspace','download'].includes(state.currentView)) renderCurrentView();
   toast("Ajout terminé");
 }
 
@@ -1123,6 +1124,140 @@ function confirmWipe(){
   };
 }
 
+
+
+/* ---------------- ESPACE DE TRAVAIL (IA) ---------------- */
+const WS = {files:[], busy:false};
+const WS_TEXT_EXT = ['txt','md','csv','json','html','htm','xml','log','js','py','css','tsv'];
+const AI_MODEL = 'claude-sonnet-5-5';
+
+function renderWorkspace(el){
+  WS.files = []; WS.busy = false;
+  el.innerHTML = `
+    <div class="section-title"><h2>🧠 Espace de travail</h2></div>
+    <div class="tag-note">Écrivez la tâche à faire, ajoutez au besoin des images ou documents avec le bouton +, puis cliquez sur « Valider ». L'assistant IA traite le travail et vous donne le résultat. Une connexion internet et une clé API (Options) sont nécessaires.</div>
+    <div class="conv-card" id="ws-box">
+      <div style="position:relative;">
+        <textarea id="ws-text" rows="7" placeholder="Ex : Résume ce document en 10 lignes. / Corrige les fautes de ce texte. / Décris cette image…" style="width:100%;box-sizing:border-box;padding:12px 12px 46px;border-radius:12px;border:1px solid var(--border);background:var(--bg);color:var(--text);font:inherit;font-size:14px;resize:vertical;"></textarea>
+        <button id="ws-plus" title="Ajouter des fichiers" style="position:absolute;left:10px;bottom:12px;width:34px;height:34px;border-radius:50%;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:22px;line-height:1;cursor:pointer;">+</button>
+        <input type="file" id="ws-in" class="hidden" multiple accept="image/*,.pdf,.docx,.txt,.md,.csv,.json,.html,.xml">
+      </div>
+      <div id="ws-files" style="display:flex;flex-wrap:wrap;gap:6px;margin:10px 0;"></div>
+      <button class="btn" id="ws-go" style="width:100%;">Valider</button>
+      <div class="err" id="ws-err"></div>
+    </div>
+    <div id="ws-result"></div>`;
+  document.getElementById('ws-plus').onclick = ()=>document.getElementById('ws-in').click();
+  document.getElementById('ws-in').onchange = e=>{
+    for(const f of Array.from(e.target.files)){
+      if(WS.files.length>=8){ toast('Maximum 8 fichiers'); break; }
+      WS.files.push(f);
+    }
+    e.target.value=''; wsDrawFiles();
+  };
+  document.getElementById('ws-go').onclick = wsRun;
+}
+
+function wsDrawFiles(){
+  const h = document.getElementById('ws-files'); if(!h) return;
+  h.innerHTML = '';
+  WS.files.forEach((f,i)=>{
+    const c = document.createElement('span');
+    c.style.cssText = 'display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:14px;background:var(--bg);border:1px solid var(--border);font-size:12px;max-width:100%;';
+    c.innerHTML = (f.type.startsWith('image/')?'🖼️':'📎')+' <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px;">'+escapeHtml(f.name)+'</span> <b style="cursor:pointer;" data-i="'+i+'">×</b>';
+    c.querySelector('b').onclick = ()=>{ WS.files.splice(i,1); wsDrawFiles(); };
+    h.appendChild(c);
+  });
+}
+
+function wsToBase64(blob){
+  return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(String(r.result).split(',')[1]); r.onerror=rej; r.readAsDataURL(blob); });
+}
+async function wsImageBlock(f){
+  const img = await loadImage(await fileToDataUrl(f));
+  const k = Math.min(1, 1600/Math.max(img.width,img.height));
+  const cv = document.createElement('canvas'); cv.width=Math.round(img.width*k); cv.height=Math.round(img.height*k);
+  const cx = cv.getContext('2d'); cx.fillStyle='#fff'; cx.fillRect(0,0,cv.width,cv.height); cx.drawImage(img,0,0,cv.width,cv.height);
+  return {type:'image', source:{type:'base64', media_type:'image/jpeg', data: cv.toDataURL('image/jpeg',0.88).split(',')[1]}};
+}
+async function wsBuildContent(task){
+  const blocks = [];
+  for(const f of WS.files){
+    const ext = ((/\.([a-z0-9]+)$/i.exec(f.name)||[])[1]||'').toLowerCase();
+    if(f.type.startsWith('image/')){
+      blocks.push({type:'text', text:'Image jointe : '+f.name}); blocks.push(await wsImageBlock(f));
+    } else if(ext==='pdf' || f.type==='application/pdf'){
+      if(f.size > 20*1024*1024) throw new Error('« '+f.name+' » dépasse 20 Mo.');
+      blocks.push({type:'document', title:f.name, source:{type:'base64', media_type:'application/pdf', data: await wsToBase64(f)}});
+    } else if(ext==='docx'){
+      const r = await mammoth.extractRawText({arrayBuffer: await f.arrayBuffer()});
+      blocks.push({type:'text', text:'Contenu du document Word « '+f.name+' » :\n'+r.value.slice(0,150000)});
+    } else if(WS_TEXT_EXT.includes(ext) || f.type.startsWith('text/')){
+      blocks.push({type:'text', text:'Contenu du fichier « '+f.name+' » :\n'+(await f.text()).slice(0,150000)});
+    } else {
+      throw new Error('Le format de « '+f.name+' » n\'est pas pris en charge (images, PDF, Word .docx, texte).');
+    }
+  }
+  blocks.push({type:'text', text:'Tâche à effectuer :\n'+task});
+  return blocks;
+}
+
+async function wsRun(){
+  if(WS.busy) return;
+  const err = document.getElementById('ws-err'), out = document.getElementById('ws-result');
+  const task = document.getElementById('ws-text').value.trim();
+  err.textContent = ''; out.innerHTML = '';
+  if(!task){ err.textContent = "Écrivez d'abord la tâche à faire."; return; }
+  if(!state.settings.aiKey){ err.textContent = "Aucune clé API enregistrée. Allez dans Options → Assistant IA pour la coller."; return; }
+  const go = document.getElementById('ws-go');
+  WS.busy = true; go.disabled = true; go.textContent = 'Traitement en cours…';
+  try{
+    const content = await wsBuildContent(task);
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method:'POST',
+      headers:{'content-type':'application/json','x-api-key':state.settings.aiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body: JSON.stringify({model:AI_MODEL, max_tokens:4096,
+        system:"Tu es l'assistant de l'Espace de travail de l'application GJM File Hub. Réponds en français, de façon claire et directement exploitable, sauf si la tâche demande une autre langue.",
+        messages:[{role:'user', content}]})
+    });
+    const data = await r.json().catch(()=>({}));
+    if(!r.ok){
+      let m = (data.error && data.error.message) || ('Erreur '+r.status);
+      if(r.status===401) m = "Clé API refusée. Vérifiez-la dans Options → Assistant IA.";
+      else if(r.status===429) m = "Trop de demandes ou limite atteinte. Réessayez dans un moment.";
+      else if(r.status===400 && /credit/i.test(m)) m = "Crédit insuffisant sur votre compte Anthropic.";
+      throw new Error(m);
+    }
+    const text = (data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n').trim() || '(Réponse vide)';
+    wsShowResult(text, task);
+  }catch(e){
+    console.error(e);
+    err.textContent = (e instanceof TypeError) ? "Connexion impossible. Vérifiez votre accès internet." : e.message;
+  }finally{
+    WS.busy = false; go.disabled = false; go.textContent = 'Valider';
+  }
+}
+
+function wsShowResult(text, task){
+  const out = document.getElementById('ws-result');
+  out.innerHTML = `<div class="conv-card" style="margin-top:14px;">
+      <h4>✅ Résultat</h4>
+      <div id="ws-answer" style="white-space:pre-wrap;font-size:13.5px;line-height:1.5;word-break:break-word;margin-bottom:12px;"></div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;">
+        <button class="btn small" id="ws-copy">Copier</button>
+        <button class="btn small secondary" id="ws-save-doc">Enregistrer dans Documents</button>
+        <button class="btn small secondary" id="ws-save-dev">Sur l'appareil (.txt)</button>
+        <button class="btn small secondary" id="ws-new">Nouvelle tâche</button>
+      </div></div>`;
+  document.getElementById('ws-answer').textContent = text;
+  const name = 'Resultat-' + new Date().toISOString().slice(0,16).replace(/[:T]/g,'-') + '.txt';
+  const mk = ()=>new File([text], name, {type:'text/plain'});
+  document.getElementById('ws-copy').onclick = async ()=>{ try{ await navigator.clipboard.writeText(text); toast('Copié'); }catch(e){ toast('Copie impossible'); } };
+  document.getElementById('ws-save-doc').onclick = ()=>handleUpload([mk()], 'document', null);
+  document.getElementById('ws-save-dev').onclick = ()=>saveBlob(name, mk());
+  document.getElementById('ws-new').onclick = ()=>renderWorkspace(document.getElementById('view-inner'));
+  out.scrollIntoView({behavior:'smooth', block:'start'});
+}
 
 /* ---------------- TÉLÉCHARGEMENT (lien direct) ---------------- */
 const DL_AUDIO_EXT = ['mp3','m4a','aac','wav','ogg','oga','opus','flac','wma'];
@@ -1557,6 +1692,14 @@ function renderOptions(el){
     </div>
 
     <div class="opt-block">
+      <h3>🧠 Assistant IA (Espace de travail)</h3>
+      <p style="font-size:11.5px;color:var(--text-dim);margin-top:-6px;">Collez votre clé API Anthropic (console.anthropic.com). Elle reste uniquement sur cet appareil. L'utilisation est facturée par Anthropic selon votre consommation.</p>
+      <div class="field"><label>Clé API</label><input id="ai-key" type="password" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="${s.aiKey ? '•••••••• (déjà enregistrée)' : 'sk-ant-…'}"></div>
+      <button class="btn small" id="save-aikey">Enregistrer la clé</button>
+      ${s.aiKey ? '<button class="btn secondary small" id="del-aikey" style="margin-left:8px;">Supprimer la clé</button>' : ''}
+    </div>
+
+    <div class="opt-block">
       <h3>🔒 Sécurité</h3>
       <p style="font-size:11.5px;color:var(--text-dim);margin-top:-6px;">Définissez un identifiant et un mot de passe pour verrouiller l'accès à l'application.</p>
       <div class="field"><label>Nom d'utilisateur</label><input id="sec-username" autocapitalize="off" autocorrect="off" spellcheck="false" value="${escapeHtml(s.username||'')}"></div>
@@ -1592,6 +1735,13 @@ function renderOptions(el){
     saveSettings({appName:v});
     toast("Nom de l'application mis à jour");
   };
+  document.getElementById('save-aikey').onclick = ()=>{
+    const v = document.getElementById('ai-key').value.trim();
+    if(!v){ toast("Collez d'abord votre clé"); return; }
+    saveSettings({aiKey:v}); toast("Clé enregistrée"); renderOptions(document.getElementById('view-inner'));
+  };
+  const dk = document.getElementById('del-aikey');
+  if(dk) dk.onclick = ()=>{ saveSettings({aiKey:''}); toast("Clé supprimée"); renderOptions(document.getElementById('view-inner')); };
   document.getElementById('save-security').onclick = async ()=>{
     const uname = document.getElementById('sec-username').value.trim();
     const p1 = document.getElementById('sec-pass').value;
